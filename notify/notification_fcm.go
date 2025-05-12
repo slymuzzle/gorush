@@ -102,6 +102,33 @@ func GetAndroidNotification(req *PushNotification) []*messaging.Message {
 		}
 	}
 
+	// Zero value for clear the badge on the app icon.
+	if req.Badge != nil && *req.Badge >= 0 {
+		badge := *req.Badge
+		switch {
+		case req.APNS == nil:
+			req.APNS = &messaging.APNSConfig{
+				Payload: &messaging.APNSPayload{
+					Aps: &messaging.Aps{
+						Badge: &badge,
+					},
+				},
+			}
+		case req.APNS.Payload == nil:
+			req.APNS.Payload = &messaging.APNSPayload{
+				Aps: &messaging.Aps{
+					Badge: &badge,
+				},
+			}
+		case req.APNS.Payload.Aps == nil:
+			req.APNS.Payload.Aps = &messaging.Aps{
+				Badge: &badge,
+			}
+		default:
+			req.APNS.Payload.Aps.Badge = &badge
+		}
+	}
+
 	// Check if the notification has a sound
 	if req.Sound != nil {
 		sound, ok := req.Sound.(string)
