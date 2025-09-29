@@ -3,8 +3,11 @@ package config
 import (
 	"bytes"
 	"fmt"
+	"net"
 	"os"
+	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/viper"
@@ -309,46 +312,97 @@ type SectionGRPC struct {
 	Port    string `yaml:"port"`
 }
 
-func setDefault() {
+func setDefaults() {
+	// Core defaults
+	viper.SetDefault("core.enabled", true)
+	viper.SetDefault("core.address", "")
+	viper.SetDefault("core.shutdown_timeout", 30)
+	viper.SetDefault("core.port", "8088")
+	viper.SetDefault("core.worker_num", 0)
+	viper.SetDefault("core.queue_num", 0)
+	viper.SetDefault("core.max_notification", 100)
+	viper.SetDefault("core.sync", false)
+	viper.SetDefault("core.feedback_timeout", 10)
+	viper.SetDefault("core.mode", "release")
+	viper.SetDefault("core.ssl", false)
+	viper.SetDefault("core.cert_path", "cert.pem")
+	viper.SetDefault("core.key_path", "key.pem")
+	viper.SetDefault("core.pid.enabled", false)
+	viper.SetDefault("core.pid.path", "gorush.pid")
+	viper.SetDefault("core.pid.override", true)
+	viper.SetDefault("core.auto_tls.enabled", false)
+	viper.SetDefault("core.auto_tls.folder", ".cache")
+
+	// iOS defaults
+	viper.SetDefault("ios.enabled", false)
+	viper.SetDefault("ios.key_type", "pem")
+	viper.SetDefault("ios.production", false)
 	viper.SetDefault("ios.max_concurrent_pushes", uint(100))
+	viper.SetDefault("ios.max_retry", 0)
+
+	// Android defaults
+	viper.SetDefault("android.enabled", true)
+	viper.SetDefault("android.max_retry", 0)
+
+	// gRPC defaults
+	viper.SetDefault("grpc.enabled", false)
+	viper.SetDefault("grpc.port", "9000")
+
+	// Queue defaults
+	viper.SetDefault("queue.engine", "local")
+
+	// Stat defaults
+	viper.SetDefault("stat.engine", "memory")
 }
 
 // LoadConf load config from file and read in environment variables that match
 func LoadConf(confPath ...string) (*ConfYaml, error) {
-	conf := &ConfYaml{}
-
 	// load default values
-	setDefault()
+	setDefaults()
 
 	viper.SetConfigType("yaml")
 	viper.AutomaticEnv()         // read in environment variables that match
 	viper.SetEnvPrefix("gorush") // will be uppercased automatically
 	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 
+	// If config path is provided, load from file
 	if len(confPath) > 0 && confPath[0] != "" {
 		content, err := os.ReadFile(confPath[0])
 		if err != nil {
-			return conf, err
+			return nil, fmt.Errorf("failed to read config file %s: %w", confPath[0], err)
 		}
 
 		if err := viper.ReadConfig(bytes.NewBuffer(content)); err != nil {
-			return conf, err
+			return nil, fmt.Errorf("failed to parse config file %s: %w", confPath[0], err)
 		}
-	} else {
-		// Search config in home directory with name ".gorush" (without extension).
-		viper.AddConfigPath("/etc/gorush/")
-		viper.AddConfigPath("$HOME/.gorush")
-		viper.AddConfigPath(".")
-		viper.SetConfigName("config")
 
-		// If a config file is found, read it in.
-		if err := viper.ReadInConfig(); err == nil {
-			fmt.Println("Using config file:", viper.ConfigFileUsed())
-		} else if err := viper.ReadConfig(bytes.NewBuffer(defaultConf)); err != nil {
-			// load default config
-			return conf, err
-		}
+		// Early return after successfully loading config from file
+		return loadConfigFromViper()
 	}
+
+	// Search config in home directory with name ".gorush" (without extension).
+	viper.AddConfigPath("/etc/gorush/")
+	viper.AddConfigPath("$HOME/.gorush")
+	viper.AddConfigPath(".")
+	viper.SetConfigName("config")
+
+	// If a config file is found, read it in.
+	if err := viper.ReadInConfig(); err == nil {
+		fmt.Println("Using config file:", viper.ConfigFileUsed())
+		return loadConfigFromViper()
+	}
+
+	// Try to load default config as fallback
+	if err := viper.ReadConfig(bytes.NewBuffer(defaultConf)); err != nil {
+		return nil, fmt.Errorf("failed to load default config and no config file found: %w", err)
+	}
+
+	return loadConfigFromViper()
+}
+
+// loadConfigFromViper extracts config loading logic to avoid code duplication
+func loadConfigFromViper() (*ConfYaml, error) {
+	conf := &ConfYaml{}
 
 	// Core
 	conf.Core.Address = viper.GetString("core.address")
@@ -460,4 +514,91 @@ func LoadConf(confPath ...string) (*ConfYaml, error) {
 	}
 
 	return conf, nil
+}
+
+// ValidatePort validates that a port string is within valid range
+func ValidatePort(port string) error {
+	if port == "" {
+		return nil // empty port is allowed, will use default
+	}
+	p, err := strconv.Atoi(port)
+	if err != nil {
+		return fmt.Errorf("invalid port format: %s", port)
+	}
+	if p < 1 || p > 65535 {
+		return fmt.Errorf("port out of range (1-65535): %d", p)
+	}
+	return nil
+}
+
+// ValidateAddress validates that an address is not empty and contains valid characters
+func ValidateAddress(addr string) error {
+	if addr == "" {
+		return nil // empty address is allowed, will bind to all interfaces
+	}
+	// Basic validation - check if it's a valid IP or hostname format
+	if net.ParseIP(addr) == nil {
+		// If not a valid IP, check if it could be a hostname (basic check)
+		if len(addr) > 253 || strings.Contains(addr, "..") {
+			return fmt.Errorf("invalid address format: %s", addr)
+		}
+	}
+	return nil
+}
+
+// ValidatePIDPath validates and sanitizes PID file path to prevent path traversal
+func ValidatePIDPath(pidPath string) error {
+	if pidPath == "" {
+		return nil
+	}
+
+	// Clean the path to resolve any . or .. elements
+	cleanPath := filepath.Clean(pidPath)
+
+	// Check for path traversal attempts by looking for ".." in the cleaned path
+	// If a relative path attempts to traverse upwards, it will still have a ".." prefix after cleaning
+	if !filepath.IsAbs(cleanPath) && strings.HasPrefix(cleanPath, "..") {
+		return fmt.Errorf("path traversal detected in PID path: %s", pidPath)
+	}
+
+	// Ensure the path is not trying to write to sensitive system directories
+	sensitive := []string{"/etc/", "/usr/", "/var/", "/sys/", "/proc/"}
+	for _, prefix := range sensitive {
+		if strings.HasPrefix(cleanPath, prefix) {
+			return fmt.Errorf("cannot write PID file to sensitive directory: %s", cleanPath)
+		}
+	}
+
+	return nil
+}
+
+// ValidateConfig validates critical configuration parameters
+func ValidateConfig(cfg *ConfYaml) error {
+	if err := ValidatePort(cfg.Core.Port); err != nil {
+		return fmt.Errorf("invalid core port: %w", err)
+	}
+
+	if err := ValidateAddress(cfg.Core.Address); err != nil {
+		return fmt.Errorf("invalid core address: %w", err)
+	}
+
+	if err := ValidatePIDPath(cfg.Core.PID.Path); err != nil {
+		return fmt.Errorf("invalid PID path: %w", err)
+	}
+
+	// Validate Redis address if Redis is enabled
+	if cfg.Stat.Engine == "redis" && cfg.Stat.Redis.Addr != "" {
+		host, port, err := net.SplitHostPort(cfg.Stat.Redis.Addr)
+		if err != nil {
+			return fmt.Errorf("invalid Redis address format: %s", cfg.Stat.Redis.Addr)
+		}
+		if err := ValidateAddress(host); err != nil {
+			return fmt.Errorf("invalid Redis host: %w", err)
+		}
+		if err := ValidatePort(port); err != nil {
+			return fmt.Errorf("invalid Redis port: %w", err)
+		}
+	}
+
+	return nil
 }

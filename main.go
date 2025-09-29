@@ -93,9 +93,7 @@ func main() {
 	// set default parameters.
 	cfg, err := config.LoadConf(configFile)
 	if err != nil {
-		log.Printf("Load yaml config file error: '%v'", err)
-
-		return
+		log.Fatalf("Load yaml config file error: %v", err)
 	}
 
 	// Initialize push slots for concurrent iOS pushes
@@ -137,12 +135,23 @@ func main() {
 		cfg.Stat.Redis.Addr = opts.Stat.Redis.Addr
 	}
 
-	// overwrite server port and address
+	// overwrite server port and address with validation
 	if opts.Core.Port != "" {
+		if err := config.ValidatePort(opts.Core.Port); err != nil {
+			log.Fatalf("Invalid port from command line: %v", err)
+		}
 		cfg.Core.Port = opts.Core.Port
 	}
 	if opts.Core.Address != "" {
+		if err := config.ValidateAddress(opts.Core.Address); err != nil {
+			log.Fatalf("Invalid address from command line: %v", err)
+		}
 		cfg.Core.Address = opts.Core.Address
+	}
+
+	// Validate configuration for security issues
+	if err := config.ValidateConfig(cfg); err != nil {
+		log.Fatalf("Configuration validation failed: %v", err)
 	}
 
 	if err = logx.InitLog(
@@ -196,11 +205,11 @@ func main() {
 		}
 
 		if err := status.InitAppStatus(cfg); err != nil {
-			return
+			logx.LogError.Fatalf("Failed to initialize app status: %v", err)
 		}
 
 		if _, err := notify.PushToAndroid(g.ShutdownContext(), req, cfg); err != nil {
-			return
+			logx.LogError.Fatalf("Failed to push Android notification: %v", err)
 		}
 
 		return
@@ -231,11 +240,11 @@ func main() {
 		}
 
 		if err := status.InitAppStatus(cfg); err != nil {
-			return
+			logx.LogError.Fatalf("Failed to initialize app status: %v", err)
 		}
 
 		if _, err := notify.PushToHuawei(g.ShutdownContext(), req, cfg); err != nil {
-			return
+			logx.LogError.Fatalf("Failed to push Huawei notification: %v", err)
 		}
 
 		return
@@ -270,15 +279,15 @@ func main() {
 		}
 
 		if err := status.InitAppStatus(cfg); err != nil {
-			return
+			logx.LogError.Fatalf("Failed to initialize app status: %v", err)
 		}
 
 		if err := notify.InitAPNSClient(g.ShutdownContext(), cfg); err != nil {
-			return
+			logx.LogError.Fatalf("Failed to initialize APNS client: %v", err)
 		}
 
 		if _, err := notify.PushToIOS(g.ShutdownContext(), req, cfg); err != nil {
-			return
+			logx.LogError.Fatalf("Failed to push iOS notification: %v", err)
 		}
 
 		return
@@ -289,6 +298,9 @@ func main() {
 	}
 
 	if opts.Core.PID.Path != "" {
+		if err := config.ValidatePIDPath(opts.Core.PID.Path); err != nil {
+			log.Fatalf("Invalid PID path from command line: %v", err)
+		}
 		cfg.Core.PID.Path = opts.Core.PID.Path
 		cfg.Core.PID.Enabled = true
 		cfg.Core.PID.Override = true
@@ -483,20 +495,25 @@ func createPIDFile(cfg *config.ConfYaml) error {
 	}
 
 	pidPath := cfg.Core.PID.Path
+
+	// Additional validation before creating PID file
+	if err := config.ValidatePIDPath(pidPath); err != nil {
+		return err
+	}
 	_, err := os.Stat(pidPath)
 	if os.IsNotExist(err) || cfg.Core.PID.Override {
 		currentPid := os.Getpid()
 		if err := os.MkdirAll(filepath.Dir(pidPath), os.ModePerm); err != nil {
-			return fmt.Errorf("can't create PID folder on %v", err)
+			return fmt.Errorf("can't create PID folder: %w", err)
 		}
 
 		file, err := os.Create(pidPath)
 		if err != nil {
-			return fmt.Errorf("can't create PID file: %v", err)
+			return fmt.Errorf("can't create PID file: %w", err)
 		}
 		defer file.Close()
 		if _, err := file.WriteString(strconv.FormatInt(int64(currentPid), 10)); err != nil {
-			return fmt.Errorf("can't write PID information on %s: %v", pidPath, err)
+			return fmt.Errorf("can't write PID information on %s: %w", pidPath, err)
 		}
 	} else {
 		return fmt.Errorf("%s already exists", pidPath)
